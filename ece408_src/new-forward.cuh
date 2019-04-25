@@ -3,15 +3,15 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #include <mxnet/base.h>
-#define TILE_WIDTH 8
+// #define TILE_WIDTH 16
 //rai -p ece408_project --queue rai_amd64_ece408 --submit=m3
 
 namespace mxnet
 {
 namespace op
 {
-
-__global__ void forward_kernel(float * __restrict__ y, const float * __restrict__ x, const float * __restrict__ k, const int B, const int M, const int C, const int H, const int W, const int K)
+    
+__global__ void forward_kernel(float * __restrict__ y, const float * __restrict__ x, const float * __restrict__ k, const int B, const int M, const int C, const int H, const int W, const int K,const int TILE_WIDTH)
 {
 
     /*
@@ -21,14 +21,36 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
     We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
     */
 
+    //load W into the shared memory 
+    // all threads collaborate to copy portion of the input X that is required to compute the output tile into the shared memory 
+    // compute partial sum of output_y 
+    // move to the next input channel 
+
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    int n = blockIdx.x;
-    int m = blockIdx.y;
+
+    const int x_tile_width  = TILE_WIDTH + K -1;
+
+    int n = blockIdx.x; //which input image 
+    int m = blockIdx.y; //which mask 
+
     int H_Grid = ceil(H_out/(float)TILE_WIDTH);
     int W_Grid = ceil(W_out/(float)TILE_WIDTH);
-    int h = blockIdx.z/(H_Grid)*TILE_WIDTH + threadIdx.y; 
-    int w = blockIdx.z%(W_Grid)*TILE_WIDTH + threadIdx.x;
+
+    int h0 = threadIdx.y; 
+    int w0 = threadIdx.x;
+
+    int h_base = (blockIdx.z / H_Grid) * TILE_WIDTH; //vertical base out data index for this block 
+    int w_base = (blockIdx.z % W_Grid) * TILE_WIDTH; //horizontal base out data index for the block
+
+    int h = h_base + h0; 
+    int w = w_base+ w0;
+    // const int feature_width = K;
+    extern __shared__ float shmem[];
+
+    float* shared_feature_map = &shmem[x_tile_width* x_tile_width];
+    float* shared_x = &shmem[0];
+
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
@@ -36,26 +58,51 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
     #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
     #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
-    int c,p,q;
-    if(h<H_out && w<W_out){
-        // y4d(n, m, h, w) = 0;
-        float a=0;
-        //#pragma unroll
-        for (c = 0; c < C; c++){
-            #pragma unroll
-            for (p = 0; p < K; p++)
-                #pragma unroll
-                for (q = 0; q < K; q++)
-                    a+=x4d(n,c,h+p,w+q)*k4d(m, c, p, q);
+    float acc = 0;
+    for(int c = 0; c < C; c++){
+        // for each channel, 
+        if((h0 < K ) && (w0 <K)){
+            // copy corresponding element into the shared mem from feature map based on which channel 
+            shared_feature_map[h0 * K + w0] = k4d(m,c,h0,w0);
         }
-        y4d(n, m, h, w) = a;
+        __syncthreads();
+
+        for(int i = h; i < h_base + x_tile_width; i += TILE_WIDTH){
+            // copy the portion of input into shared meme 
+            if(i < H){
+                #pragma unroll
+                for(int j = w; j < w_base +x_tile_width && j < W; j+= TILE_WIDTH){
+                    if(j < W){
+                        shared_x[(i-h_base)*x_tile_width + (j-w_base)] = x4d(n,c,i,j); 
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        
+        for(int p = 0; p < K; p++){
+            #pragma unroll
+            for(int q = 0; q < K; q++){
+                //shared_x[h0+p, w0+q]
+                acc += shared_x[(h0+p)*x_tile_width + (w0+q)]* shared_feature_map[p*K + q];
+            }
+        }
+        __syncthreads();
+        if(h < H_out && w < W_out){
+            y4d(n,m,h,w) = acc;
+        }
+        __syncthreads();
+        // compute the partial sum of the output 
     }
 
     
-#undef y4d
-#undef x4d
-#undef k4d
+    #undef y4d
+    #undef x4d
+    #undef k4d
 }
+
+
 
 /* 
    This function is called by new-inl.h
@@ -71,33 +118,40 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
  
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
-    const int B = x.shape_[0];
-    const int M = y.shape_[1];
-    const int H = x.shape_[2];
-    const int W = x.shape_[3];
-    const int C = x.shape_[1];
-    const int K = w.shape_[3];
+    int TILE_WIDTH;
+    const int B = x.shape_[0]; //the size of input 
+    const int M = y.shape_[1]; // the number of output features 
+    const int H = x.shape_[2]; // the height 
+    const int W = x.shape_[3]; // the width 
+    const int C = x.shape_[1]; // the size of channels 
+    const int K = w.shape_[3]; //the size of feature maps 
     
     int H_out = H-K+1;
     int W_out = W-K+1;
+
+    if(W%24==0){
+        TILE_WIDTH=16;
+    }
+    else{
+        TILE_WIDTH=8;
+    }
     int H_Grid = ceil(H_out/(float)TILE_WIDTH);
     int W_Grid = ceil(W_out/(float)TILE_WIDTH);
     int Z=H_Grid*W_Grid;
+    size_t shmem_size = sizeof(float)*((TILE_WIDTH+K-1)*(TILE_WIDTH+K-1) + K*K);
     dim3 blockDim(TILE_WIDTH,TILE_WIDTH, 1);
     dim3 gridDim(B,M,Z);
-   
-    printf("B is: %d ", B);
-    printf("M is: %d ", M);
-    printf("H is: %d ", H);
-    printf("W is: %d ", W);
-    printf("C is: %d ", C);
-    printf("K is: %d ", K);
+    forward_kernel<<<gridDim, blockDim,shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,TILE_WIDTH);
+
+    
+    
+
     // Call the kernel
-    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
+    
+
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
-
 }
 
 /* 
