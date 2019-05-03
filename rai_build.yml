@@ -23,8 +23,9 @@ commands:
     # - python m3.1.py 100
     # - python m3.1.py 1000
     # - python m3.1.py 10000
-    - python m4.1.py 10000
+    - python final.py 10000
+    - nvprof python final.py
     # - nvprof -o timeline.nvprof python m4.1.py
     # - nvprof --kernels "::forward:1" --analysis-metrics -o forward1_analysis.nvprof python m4.1.py
     # - nvprof --kernels "::forward:2" --analysis-metrics -o forward2_analysis.nvprof python m4.1.py
-    # - nvprof -f --analysis-metrics -o analysis.nvvp python m1.2.py # execute code
+    # - nvprof -f --analysis-metrics -o analysis.nvvp python m4.1.py # execute code

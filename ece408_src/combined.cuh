@@ -40,8 +40,8 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
     int h0 = threadIdx.y; 
     int w0 = threadIdx.x;
 
-    int h_base = (blockIdx.z / H_Grid) * TILE_WIDTH; //vertical base out data index for this block 
-    int w_base = (blockIdx.z % W_Grid) * TILE_WIDTH; //horizontal base out data index for the block
+    int h_base = (blockIdx.z / H_Grid)*TILE_WIDTH; //vertical base out data index for this block 
+    int w_base = (blockIdx.z % W_Grid)*TILE_WIDTH; //horizontal base out data index for the block
 
     int h = h_base + h0; 
     int w = w_base+ w0;
@@ -78,6 +78,15 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
                 }
             }
         }
+        // for(int j = w; j < w_base +x_tile_width && j < W; j+= TILE_WIDTH){
+        //     if(j < W){
+        //         #pragma unroll
+        //         for(int i = h; i < h_base + x_tile_width; i += TILE_WIDTH){
+        //             if(i<H)
+        //                 shared_x[(i-h_base)*x_tile_width + (j-w_base)] = x4d(n,c,i,j); 
+        //         }
+        //     }
+        // }
 
         __syncthreads();
         
@@ -89,13 +98,13 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
             }
         }
         __syncthreads();
-        if(h < H_out && w < W_out){
-            y4d(n,m,h,w) = acc;
-        }
-        __syncthreads();
+        
+        // __syncthreads();
         // compute the partial sum of the output 
     }
-
+    if(h < H_out && w < W_out){
+        y4d(n,m,h,w) = acc;
+    }
     
     #undef y4d
     #undef x4d
@@ -129,7 +138,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     int H_out = H-K+1;
     int W_out = W-K+1;
 
-    if(W%24==0){
+    if(W%16==0){
         TILE_WIDTH=16;
     }
     else{
@@ -141,6 +150,8 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     size_t shmem_size = sizeof(float)*((TILE_WIDTH+K-1)*(TILE_WIDTH+K-1) + K*K);
     dim3 blockDim(TILE_WIDTH,TILE_WIDTH, 1);
     dim3 gridDim(B,M,Z);
+
+    
     forward_kernel<<<gridDim, blockDim,shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,TILE_WIDTH);
 
     

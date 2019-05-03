@@ -23,9 +23,8 @@ namespace mxnet {
 namespace op {
 
 
-__constant__ float kernel[6000];
 
-__global__ void forward_kernel(float * __restrict__ y, const float * __restrict__ x, const float * __restrict__ k, const int B, const int M, const int C, const int H, const int W, const int K)
+__global__ void forward_kernel(float * __restrict__ y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
 
     /*
@@ -73,8 +72,9 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
     #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
     float acc = 0;
-    for(int c = 0; c < C; c++){
-        // for each channel, 
+    unsigned int c=0;
+    // for(int c = 0; c < C; c++){
+    //     // for each channel, 
         if((h0 < K ) && (w0 <K)){
             // copy corresponding element into the shared mem from feature map based on which channel 
             shared_feature_map[h0 * K + w0] = k4d(m,c,h0,w0);
@@ -84,7 +84,7 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
         for(int i = h; i < h_base + x_tile_width; i += TILE_WIDTH){
             // copy the portion of input into shared meme 
             if(i < H){
-                #pragma unroll 
+                #pragma unroll  
                 for(int j = w; j < w_base +x_tile_width && j < W; j+= TILE_WIDTH){
                     if(j < W){
                         shared_x[(i-h_base)*x_tile_width + (j-w_base)] = x4d(n,c,i,j); 
@@ -106,7 +106,7 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
         
         // __syncthreads();
         // compute the partial sum of the output 
-    }
+    // }
     if(h < H_out && w < W_out){
         y4d(n,m,h,w) = acc;
     }
@@ -116,7 +116,7 @@ __global__ void forward_kernel(float * __restrict__ y, const float * __restrict_
     #undef k4d
 }
 
-__global__ void forward_kernel2(float *__restrict__ y, float *__restrict__ x, const int B, const int M, const int C, const int H, const int W, const int K) {
+__global__ void forward_kernel2(float *__restrict__ y, const float *__restrict__ x, const float * __restrict__ kernel, const int B, const int M, const int C, const int H, const int W, const int K) {
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     int tx = threadIdx.x;
@@ -219,7 +219,6 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     
     int H_out = H-K+1;
     int W_out = W-K+1;
-    cudaMemcpyToSymbol(kernel, w.dptr_, temp * sizeof(float), 0, cudaMemcpyDefault);
     if(W%16==0){
         int H_Grid = ceil(H_out/(float)TILE_WIDTH);
         int W_Grid = ceil(W_out/(float)TILE_WIDTH);
@@ -241,7 +240,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
         // Call the kernel
         
-        forward_kernel2<<<gridDim, blockDim>>>(y.dptr_,x.dptr_, B,M,C,H,W,K);
+        forward_kernel2<<<gridDim, blockDim>>>(y.dptr_,x.dptr_, w.dptr_,B,M,C,H,W,K);
     }
         
 
